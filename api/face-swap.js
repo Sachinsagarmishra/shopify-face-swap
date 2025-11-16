@@ -1,30 +1,40 @@
 // api/face-swap.js
 export default async function handler(req, res) {
-  // 1) CORS — allow Shopify browser to call this
-  res.setHeader('Access-Control-Allow-Origin', '*'); // for production restrict to your shop domain
+  // CORS (allow Shopify). For production restrict to your shop domain.
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  // quick answer for preflight
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    // 2) Parse body safely — Vercel serverless sometimes provides raw string
+    // parse body safely
     const raw = req.body ?? '{}';
     const payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    const { image, productImage } = payload;
+    const { image, productImage, productImageUrl } = payload;
 
-    if (!image || !productImage) {
-      return res.status(400).json({ error: 'Missing "image" or "productImage" in request body' });
+    if (!image && !productImageUrl) {
+      return res.status(400).json({ error: 'Provide "image" (user base64) or "productImageUrl" (shop image URL).' });
     }
 
-    // 3) Check env var
     const hfKey = process.env.HF_API_KEY;
-    if (!hfKey) {
-      return res.status(500).json({ error: 'HF_API_KEY is not set in environment variables' });
+    if (!hfKey) return res.status(500).json({ error: 'HF_API_KEY not set in environment variables' });
+
+    // If client provided productImageUrl, fetch the product image server-side (avoids browser CORS & big payloads).
+    let productBase64 = productImage;
+    if (!productBase64 && productImageUrl) {
+      // fetch product image as binary and convert to base64
+      const pResp = await fetch(productImageUrl);
+      if (!pResp.ok) {
+        const txt = await pResp.text().catch(()=>null);
+        console.error('Failed to fetch product image', productImageUrl, pResp.status, txt);
+        return res.status(502).json({ error: 'Failed to fetch product image URL', status: pResp.status, details: txt });
+      }
+      const ab = await pResp.arrayBuffer();
+      productBase64 = Buffer.from(ab).toString('base64');
     }
 
-    // 4) Call HuggingFace model
+    // Prepare HF request
     const HF_URL = 'https://api-inference.huggingface.co/models/face-swapper/FaceSwap';
 
     const hfResp = await fetch(HF_URL, {
@@ -35,32 +45,27 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         inputs: {
-          source_img: image,
-          target_img: productImage
+          source_img: image,         // user's face base64 (optional if HF model supports URL)
+          target_img: productBase64  // product image base64
         }
-      }),
-      // no timeout here; Vercel has its own function timeout limits
+      })
     });
 
-    // 5) Handle upstream errors clearly
+    // if HF returns non-ok, capture details and forward helpful error
     if (!hfResp.ok) {
-      const details = await hfResp.text();
-      console.error('HuggingFace returned error', hfResp.status, details);
-      return res.status(502).json({
-        error: 'Upstream error from HuggingFace',
-        status: hfResp.status,
-        details: details ? (typeof details === 'string' ? details : JSON.stringify(details)) : undefined
-      });
+      const details = await hfResp.text().catch(() => '[no body]');
+      console.error('HuggingFace error', hfResp.status, details);
+      return res.status(502).json({ error: 'Upstream error from HuggingFace', status: hfResp.status, details });
     }
 
-    // 6) Convert binary response to base64 and return
+    // HF returns binary image -> convert to base64 string
     const arrayBuffer = await hfResp.arrayBuffer();
     const base64Output = Buffer.from(arrayBuffer).toString('base64');
 
     return res.status(200).json({ swapped: base64Output });
+
   } catch (err) {
-    console.error('face-swap handler error:', err);
-    // always return JSON (and CORS headers already set)
-    return res.status(500).json({ error: (err && err.message) ? err.message : String(err) });
+    console.error('face-swap handler unexpected error:', err);
+    return res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 }
