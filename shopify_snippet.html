@@ -1,0 +1,46 @@
+<div style="margin-top:20px; padding:10px; border:1px solid #ddd;">
+  <h3>Try With Your Face</h3>
+  <input type="file" id="userFaceInput" accept="image/*" />
+  <button id="swapBtn">Preview Look</button>
+  <img id="previewResult" style="display:none; margin-top:15px; width:300px;" />
+</div>
+
+<script>
+document.getElementById("swapBtn").onclick = async () => {
+  const userFile = document.getElementById("userFaceInput").files[0];
+  if (!userFile) return alert("Please upload your photo!");
+
+  const reader = new FileReader();
+
+  reader.onload = async () => {
+    const userBase64 = reader.result.split(",")[1];
+    const productImageUrl = "{{ product.featured_image | img_url: 'master' }}";
+
+    const productImg = await fetch(productImageUrl);
+    const productBuffer = await productImg.arrayBuffer();
+    const productBase64 = btoa(
+      new Uint8Array(productBuffer)
+        .reduce((data, byte) => data + String.fromCharCode(byte), '')
+    );
+
+    const response = await fetch("https://YOUR_VERCEL_APP.vercel.app/api/face-swap", {
+      method: "POST",
+      body: JSON.stringify({
+        image: userBase64,
+        productImage: productBase64
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.swapped) {
+      document.getElementById("previewResult").src = "data:image/png;base64," + data.swapped;
+      document.getElementById("previewResult").style.display = "block";
+    } else {
+      alert("Face swap failed.");
+    }
+  };
+
+  reader.readAsDataURL(userFile);
+};
+</script>
